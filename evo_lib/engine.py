@@ -151,6 +151,7 @@ class EvolutionEngine:
         self.stage = 0
         self.generation = 0
         self._next_candidate_index = 0
+        self._prompt_nonce = 0
         self._consecutive_failures = 0
         self._best_primary_seen: float | None = None
         self._best_primary_improvement_step = 0
@@ -317,6 +318,8 @@ class EvolutionEngine:
 
     def _prepare_step(self) -> PreparedStep:
         current_step = self.step_count + 1
+        self._prompt_nonce += 1
+        variation_token = self._prompt_nonce
         in_random_init = self._is_random_init_step(current_step)
         emitter = self._choose_emitter()
         if in_random_init:
@@ -428,6 +431,10 @@ class EvolutionEngine:
                 secondary_validation_metric_label=self.config.secondary_validation_metric_label or "Secondary Validation",
                 code_language=self.config.code_language,
             )
+        prompt += (
+            f"\n\nMutation diversity token: {variation_token}. "
+            "Return a substantively different implementation; copying the target unchanged is invalid."
+        )
         emitter_name = emitter.name if emitter is not None else None
         is_local = (not in_random_init) and (emitter_name is not None) and (emitter_name in self.local_emitters)
         return PreparedStep(
@@ -461,6 +468,11 @@ class EvolutionEngine:
             )
             evaluated_children: list[CandidateEvaluation] = []
             for child in parsed_children:
+                if prepared.parents and child.code.strip() == prepared.parents[0].code.strip():
+                    evaluated_children.append(
+                        CandidateEvaluation(candidate=child, status="candidate_rejected", error="identical_to_parent")
+                    )
+                    continue
                 child.parent_ids = [parent.id for parent in prepared.parents]
                 child.metadata.update(
                     {
@@ -541,9 +553,6 @@ class EvolutionEngine:
         base_code: str,
         llm_result: Any,
     ) -> tuple[list[Candidate], Any]:
-        if self.config.output_format == "full" or prepared.in_random_init:
-            return parse_full_candidates(llm_result.response_text, self.config.parsing), llm_result
-
         parsing = self.config.parsing
         max_attempts = parsing.parse_repair_max_attempts if parsing.parse_repair_enabled else 0
 
@@ -552,8 +561,27 @@ class EvolutionEngine:
         initial_exc: ParsingError | None = None
 
         for attempt in range(max_attempts + 1):
+            # A length-limited response is known to be incomplete even when
+            # plaintext fallback happens to extract a fragment. Repair it
+            # before parsing, and disable thinking for this one code-only
+            # recovery request so the completion budget is spent on the module.
+            if self._llm_response_was_cut_off(current_result):
+                last_exc = ParsingError("LLM response was cut off (finish_reason=length)")
+                if initial_exc is None:
+                    initial_exc = last_exc
+                if attempt >= max_attempts:
+                    break
+                current_result = self.llm_client.generate(
+                    self._build_cutoff_repair_prompt(original_prompt=prepared.prompt),
+                    emitter_name=prepared.emitter_name,
+                    thinking_mode="disabled",
+                )
+                continue
             try:
-                children = parse_edit_candidates(current_result.response_text, base_code, self.config.parsing)
+                if self.config.output_format == "full" or prepared.in_random_init:
+                    children = parse_full_candidates(current_result.response_text, parsing)
+                else:
+                    children = parse_edit_candidates(current_result.response_text, base_code, parsing)
                 if attempt > 0:
                     for candidate in children:
                         candidate.metadata.update({
@@ -815,6 +843,7 @@ class EvolutionEngine:
             "stage": self.stage,
             "generation": self.generation,
             "next_candidate_index": self._next_candidate_index,
+            "prompt_nonce": self._prompt_nonce,
             "best_primary_seen": self._best_primary_seen,
             "best_primary_improvement_step": self._best_primary_improvement_step,
             "stats": self.stats.state_dict(),
@@ -900,6 +929,7 @@ class EvolutionEngine:
         engine.stage = int(raw_state.get("stage", 0))
         engine.generation = int(raw_state["generation"])
         engine._next_candidate_index = int(raw_state["next_candidate_index"])
+        engine._prompt_nonce = int(raw_state.get("prompt_nonce", engine._next_candidate_index))
         engine._best_primary_seen = raw_state.get("best_primary_seen")
         engine._best_primary_improvement_step = int(raw_state.get("best_primary_improvement_step", 0))
         engine.stats = engine.stats.from_state_dict(raw_state["stats"])
@@ -1362,6 +1392,23 @@ class EvolutionEngine:
             ">>>>>>> REPLACE\n"
             "```\n"
             "Use one edit block per changed section. The SEARCH block is a locator — keep it concise and unique."
+        )
+
+    @staticmethod
+    def _llm_response_was_cut_off(llm_result: Any) -> bool:
+        payload = getattr(llm_result, "response_payload", None)
+        if not isinstance(payload, dict):
+            return False
+        choices = payload.get("choices")
+        return bool(choices and isinstance(choices[0], dict) and choices[0].get("finish_reason") == "length")
+
+    def _build_cutoff_repair_prompt(self, *, original_prompt: str) -> str:
+        return (
+            "Your prior response was cut off before a usable complete module was returned. "
+            "Do not provide analysis, reasoning, prose, or a repair explanation. "
+            "Return ONLY one complete standalone Python module in exactly one fenced ```python block. "
+            "Be compact enough to finish.\n\nOriginal task:\n"
+            f"{original_prompt}"
         )
 
     def _build_parse_repair_prompt(self, *, original_prompt: str, broken_response: str, parse_error: Exception, base_code: str = "") -> str:

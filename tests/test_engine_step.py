@@ -628,3 +628,47 @@ def test_plateau_emitter_scheduler_shifts_toward_exploit_emitter(base_config):
 
     assert late_counts["exploit"] > early_counts["exploit"]
     assert late_counts["exploit"] > late_counts["explore"]
+
+
+def test_prepared_prompts_include_unique_diversity_tokens(
+    base_config,
+    descriptor_fn,
+    primary_fitness,
+):
+    client = FakeLLMClient([_seed_parent_diff(_seed_parent_code())])
+    engine = EvolutionEngine(
+        config=base_config,
+        llm_client=client,
+        primary_fitness=primary_fitness,
+        descriptor_fn=descriptor_fn,
+    )
+    engine.initialize([Candidate(id="seed_parent", code=_seed_parent_code())])
+
+    first = engine.prepare_step()
+    second = engine.prepare_step()
+
+    assert "Mutation diversity token:" in first.prompt
+    assert "Mutation diversity token:" in second.prompt
+    assert first.prompt != second.prompt
+
+
+def test_identical_child_is_rejected_before_fitness(
+    base_config,
+    descriptor_fn,
+    primary_fitness,
+):
+    client = FakeLLMClient([_seed_parent_diff(_seed_parent_code())])
+    engine = EvolutionEngine(
+        config=base_config,
+        llm_client=client,
+        primary_fitness=primary_fitness,
+        descriptor_fn=descriptor_fn,
+    )
+    engine.initialize([Candidate(id="seed_parent", code=_seed_parent_code())])
+    engine.step()
+
+    events = [json.loads(line) for line in (engine.run_store.run_dir / "events.jsonl").read_text().splitlines()]
+    assert any(
+        event.get("type") == "candidate_rejected" and event.get("reason") == "identical_to_parent"
+        for event in events
+    )

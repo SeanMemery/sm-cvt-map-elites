@@ -187,7 +187,7 @@ export default function App() {
           />
           <Route path="/candidates" element={<CandidateBrowserPage key={`${selectedRunId}:${islandMode}`} runId={selectedRunId} islandMode={islandMode} />} />
           <Route path="/candidates/:candidateId" element={<CandidatePage runId={selectedRunId} />} />
-          <Route path="/runs/:runId" element={<LegacyRunRedirect onSelectRun={setSelectedRunId} target="/overview" />} />
+          <Route path="/runs/:runId" element={<LegacyRunOverview onSelectRun={setSelectedRunId} />} />
           <Route path="/runs/:runId/archive" element={<LegacyRunRedirect onSelectRun={setSelectedRunId} target="/archive" />} />
           <Route path="/runs/:runId/sampling" element={<LegacyRunRedirect onSelectRun={setSelectedRunId} target="/sampling" />} />
           <Route path="/runs/:runId/candidates" element={<LegacyRunRedirect onSelectRun={setSelectedRunId} target="/candidates" />} />
@@ -196,6 +196,16 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+function LegacyRunOverview({ onSelectRun }: { onSelectRun: (runId: string | null) => void }) {
+  const { runId } = useParams();
+
+  useEffect(() => {
+    if (runId) onSelectRun(runId);
+  }, [onSelectRun, runId]);
+
+  return <RunOverviewPage key={runId} runId={runId ?? null} islandMode="single" />;
 }
 
 function LegacyRunRedirect({ onSelectRun, target }: { onSelectRun: (runId: string | null) => void; target: string }) {

@@ -773,7 +773,7 @@ export function RunOverviewPage({ runId, islandMode = "all" }: RunOverviewPagePr
             <div className="panel-header">
               <div className="title-with-help">
                 <h3>Fitness Over Time</h3>
-                <HelpBadge text="Tracks best and mean fitness across steps." />
+                <HelpBadge text="Best is best-so-far and can remain flat while search continues. Mean is the mean fitness of current archive elites, not all generated candidates. Check Archive Occupancy to see whether cells are changing." />
               </div>
             </div>
             <IslandFitnessChart islandStats={islandStats} islandIds={islandIds} />
