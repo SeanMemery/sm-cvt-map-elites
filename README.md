@@ -53,12 +53,6 @@ npm install
 npm run build
 ```
 
-Run tests:
-
-```bash
-uv run pytest
-```
-
 ## Quick start
 
 The engine owns the evolutionary search. You provide a fitness function and a behaviour descriptor.

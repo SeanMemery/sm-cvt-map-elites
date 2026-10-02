@@ -40,7 +40,6 @@ viewer/
   backend/run_loader.py
   frontend/src/    React/Vite app
 
-tests/
 validation/        local experiments (git-ignored)
 ```
 
