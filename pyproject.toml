@@ -24,8 +24,5 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["evo_lib"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-
 [tool.uv]
 default-groups = ["dev"]
