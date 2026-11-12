@@ -61,6 +61,7 @@ class PreparedStep:
     emitter_name: str | None = None
     thinking_mode: ThinkingMode = "default"
     is_local: bool = False  # True when a local emitter handles this step instead of the LLM
+    use_mutator: bool = False  # True when an injected mutator handles this step
 
 
 @dataclass
@@ -112,10 +113,14 @@ class EvolutionEngine:
         run_store: RunStore | None = None,
         cross_island_elite_provider: Callable[[str | None], list[Candidate]] | None = None,
         local_emitters: dict[str, Callable[[Candidate], list[Candidate]]] | None = None,
+        mutator: Callable[[Candidate, list[Candidate], list[Candidate]], list[Candidate]] | None = None,
     ):
         self.config = config
         self.llm_client = llm_client
         self.local_emitters: dict[str, Callable[[Candidate], list[Candidate]]] = local_emitters or {}
+        # Optional pluggable mutation hook: (parent, ancestors, inspirations) -> child
+        # Candidates, replacing the built-in LLM prompt+diff mutation.
+        self.mutator = mutator
         self.error_feedback = ErrorFeedbackCollector(
             top_n=self.config.error_feedback_count,
             enabled=self.config.error_feedback_enabled,
@@ -439,12 +444,17 @@ class EvolutionEngine:
             emitter_name=emitter_name,
             thinking_mode=self._resolve_thinking_mode(emitter),
             is_local=is_local,
+            use_mutator=(self.mutator is not None) and (not in_random_init) and bool(parents),
         )
 
     def _execute_prepared_step(self, prepared: PreparedStep, _skip_fitness: bool = False) -> ExecutedStep:
         # Route local emitters — skip LLM entirely
         if prepared.is_local and prepared.emitter_name in self.local_emitters:
             return self._execute_local_emitter(prepared)
+
+        # Route an injected mutator — replaces the built-in LLM mutation
+        if prepared.use_mutator and self.mutator is not None:
+            return self._execute_mutator(prepared)
 
         llm_result = None
         try:
@@ -531,6 +541,47 @@ class EvolutionEngine:
                 evaluated.append(CandidateEvaluation(candidate=child, status="ready"))
             except Exception as exc:
                 evaluated.append(CandidateEvaluation(candidate=child, status="primary_fitness_failure", error=str(exc)))
+
+        return ExecutedStep(prepared=prepared, llm_result=None, children=evaluated, error=None)
+
+    def _execute_mutator(self, prepared: PreparedStep) -> ExecutedStep:
+        """Execute an injected mutator: (parent, ancestors, inspirations) -> children."""
+        parent = prepared.parents[0]
+        try:
+            raw_children = self.mutator(parent, prepared.ancestors, prepared.inspirations)  # type: ignore[misc]
+        except Exception as exc:
+            return ExecutedStep(prepared=prepared, llm_result=None, children=None, error=exc)
+
+        evaluated: list[CandidateEvaluation] = []
+        for child in raw_children:
+            if child.code.strip() == parent.code.strip():
+                evaluated.append(
+                    CandidateEvaluation(candidate=child, status="candidate_rejected", error="identical_to_parent")
+                )
+                continue
+            child.parent_ids = [parent.id]
+            child.metadata.update({
+                "target_candidate_id": parent.id,
+                "ancestor_ids": [candidate.id for candidate in prepared.ancestors],
+                "inspiration_ids": [candidate.id for candidate in prepared.inspirations],
+                "emitter_name": prepared.emitter_name,
+                "mutator": True,
+            })
+            try:
+                if self.candidate_validator is not None and not self.candidate_validator(child):
+                    evaluated.append(
+                        CandidateEvaluation(candidate=child, status="candidate_rejected", error="validator_failed")
+                    )
+                    continue
+                child.primary_fitness, child.stats = _unwrap_fitness(self.primary_fitness_fn(child))
+                if self.primary_validation_fitness_fn is not None:
+                    child.primary_validation_fitness, _ = _unwrap_fitness(self.primary_validation_fitness_fn(child))
+                child.descriptor_raw = [float(v) for v in self.descriptor_fn(child)]
+                evaluated.append(CandidateEvaluation(candidate=child, status="ready"))
+            except Exception as exc:
+                evaluated.append(
+                    CandidateEvaluation(candidate=child, status="primary_fitness_failure", error=str(exc))
+                )
 
         return ExecutedStep(prepared=prepared, llm_result=None, children=evaluated, error=None)
 
