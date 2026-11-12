@@ -273,6 +273,9 @@ class OpenAICompatibleClient:
             "temperature": self.config.temperature,
             "max_tokens": self.config.max_tokens,
             "n": self.config.n,
+            # The LLM router's qwen worker has auto tool-choice enabled; force plain
+            # text (code) output so the model does not emit tool_calls with null content.
+            "tool_choice": "none",
         }
         resolved_thinking_mode = self.config.thinking_mode if thinking_mode == "default" else thinking_mode
         if resolved_thinking_mode == "enabled":
@@ -312,7 +315,6 @@ class OpenAICompatibleClient:
                     finished_at=finished_at,
                     request_payload=payload,
                     response_payload=body,
-                    reasoning_text=self._extract_reasoning(body),
                 )
             except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
                 last_error = exc
@@ -323,8 +325,7 @@ class OpenAICompatibleClient:
                     can_retry = attempt < max_retries_long
                 if not can_retry:
                     raise LLMError(f"LLM request failed after {attempt + 1} attempt(s): {exc}") from exc
-                # Local inference endpoints recover quickly; honor the configured
-                # cadence instead of sleeping for escalating multi-minute periods.
+                # Use the configured fixed delay for all retry attempts.
                 time.sleep(self.config.retry_backoff_seconds)
                 attempt += 1
         raise LLMError(f"LLM request failed: {last_error}")
@@ -364,18 +365,12 @@ class OpenAICompatibleClient:
         return routes
 
     @staticmethod
-    def _extract_text(body: dict[str, Any], ) -> str:
+    def _extract_text(body: dict[str, Any]) -> str:
         choices = body["choices"]
         if not choices:
             raise LLMError("LLM response contained no choices")
         message = choices[0]["message"]
-        content = message.get("content")
-        if content is None and message.get("reasoning"):
-            # vLLM qwen3 reasoning parser splits thinking into the `reasoning`
-            # field; when the generation is cut short the final `content` may be
-            # null while reasoning still holds the text. Fall back so callers can
-            # still parse (and repair) a partial fenced module.
-            content = message.get("reasoning")
+        content = message["content"]
         if isinstance(content, str):
             return content
         if isinstance(content, list):
@@ -388,21 +383,6 @@ class OpenAICompatibleClient:
                 raise LLMError("LLM response content parts contained no text")
             return text
         raise LLMError("Unsupported LLM response content format")
-
-    @staticmethod
-    def _extract_reasoning(body: dict[str, Any]) -> str | None:
-        try:
-            choices = body.get("choices", [])
-            if not choices:
-                return None
-            message = choices[0].get("message", {})
-            for key in ("reasoning", "reasoning_content"):
-                val = message.get(key)
-                if isinstance(val, str) and val.strip():
-                    return val.strip()
-            return None
-        except (KeyError, TypeError, IndexError):
-            return None
 
 class MultiEmitterLLMClient:
     def __init__(

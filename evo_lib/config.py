@@ -27,7 +27,7 @@ class LLMConfig:
     thinking_mode: ThinkingMode = "default"
     timeout_seconds: int = 60
     temperature: float = 0.8
-    max_tokens: int = 4096
+    max_tokens: int = 16384
     n: int = 1
     max_retries: int = 15
     retry_backoff_seconds: float = 180.0  # Fixed delay between retry attempts
